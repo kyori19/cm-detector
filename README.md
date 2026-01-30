@@ -1,0 +1,243 @@
+# cm-detector
+
+日本のテレビ放送のCM区間を検出するツール。ffmpegのsilencedetect出力を解析し、15秒/30秒単位のCMブロックを特定します。
+
+## ビルド方法
+
+### Dockerを使用（推奨）
+
+```bash
+docker build -t cm-detector .
+```
+
+### ローカルビルド
+
+```bash
+# musl ターゲットを追加（静的リンク用）
+rustup target add x86_64-unknown-linux-musl
+
+# ビルド
+cargo build --release --target x86_64-unknown-linux-musl
+```
+
+## 使用方法
+
+cm-detectorはffmpegのsilencedetect出力を標準入力から受け取ります。
+
+### 基本的な使い方
+
+```bash
+ffmpeg -i video.mp4 -af "silencedetect=n=-40dB:d=0.3" -f null - 2>&1 | cm-detector
+```
+
+### Dockerを使用
+
+```bash
+ffmpeg -i video.mp4 -af "silencedetect=n=-40dB:d=0.3" -f null - 2>&1 | \
+  docker run -i --rm cm-detector
+```
+
+### 出力例
+
+```json
+{
+  "input_file": "stdin",
+  "cm_blocks": [
+    {
+      "start_ms": 120000,
+      "end_ms": 180000,
+      "duration_sec": 60.0,
+      "segments": [
+        {"start_ms": 120000, "end_ms": 135000, "duration_sec": 15.0},
+        {"start_ms": 135000, "end_ms": 165000, "duration_sec": 30.0},
+        {"start_ms": 165000, "end_ms": 180000, "duration_sec": 15.0}
+      ]
+    }
+  ],
+  "silence_segments": [...]
+}
+```
+
+## Kubernetes init container での使用例
+
+cm-detectorをinit containerとして使用し、バイナリを共有ボリュームにコピーする例：
+
+```yaml
+apiVersion: v1
+kind: Pod
+metadata:
+  name: video-processor
+spec:
+  initContainers:
+    - name: install-cm-detector
+      image: ghcr.io/aitokis/cm-detector:latest
+      command: ["/bin/cp", "/cm-detector", "/tools/cm-detector"]
+      volumeMounts:
+        - name: tools
+          mountPath: /tools
+  containers:
+    - name: processor
+      image: linuxserver/ffmpeg
+      command:
+        - /bin/sh
+        - -c
+        - |
+          ffmpeg -i /input/video.mp4 -af "silencedetect=n=-40dB:d=0.3" -f null - 2>&1 | \
+          /tools/cm-detector > /output/cm-blocks.json
+      volumeMounts:
+        - name: tools
+          mountPath: /tools
+        - name: input
+          mountPath: /input
+        - name: output
+          mountPath: /output
+  volumes:
+    - name: tools
+      emptyDir: {}
+    - name: input
+      # 入力ソースを指定
+    - name: output
+      # 出力先を指定
+```
+
+## CMカット動画のエンコード
+
+cm-detectorの出力を使って、CM区間をカットした動画をエンコードできます。
+
+### 本編区間の取得
+
+JSON出力から本編区間（CMブロック以外の部分）を計算します。
+
+```bash
+# CM検出結果を保存
+ffmpeg -i video.mp4 -af "silencedetect=n=-40dB:d=0.3" -f null - 2>&1 | cm-detector > cm.json
+
+# 本編区間を確認（jqで抽出）
+# cm_blocksの前後が本編区間になる
+cat cm.json | jq '.cm_blocks[] | "\(.start_ms/1000) - \(.end_ms/1000)"'
+```
+
+### 単一の本編区間を切り出す
+
+```bash
+# 開始から最初のCMまで（例：0秒〜120秒が本編の場合）
+ffmpeg -i video.mp4 -ss 0 -to 120 -c:v libx264 -c:a aac output_part1.mp4
+
+# CM後の本編（例：180秒〜600秒が本編の場合）
+ffmpeg -i video.mp4 -ss 180 -to 600 -c:v libx264 -c:a aac output_part2.mp4
+```
+
+### 複数の本編区間を連結してエンコード
+
+複数の本編区間をCMをスキップして1つの動画にまとめる方法：
+
+#### 方法1: concat demuxer（推奨・高速）
+
+```bash
+# 1. 本編区間を個別ファイルに切り出し（再エンコードなし）
+ffmpeg -i video.mp4 -ss 0 -to 120 -c copy part1.mp4
+ffmpeg -i video.mp4 -ss 180 -to 600 -c copy part2.mp4
+ffmpeg -i video.mp4 -ss 660 -to 1500 -c copy part3.mp4
+
+# 2. 連結リストを作成
+cat > concat.txt << 'EOF'
+file 'part1.mp4'
+file 'part2.mp4'
+file 'part3.mp4'
+EOF
+
+# 3. 連結してエンコード
+ffmpeg -f concat -safe 0 -i concat.txt -c:v libx264 -c:a aac output.mp4
+
+# 4. 一時ファイル削除
+rm part1.mp4 part2.mp4 part3.mp4 concat.txt
+```
+
+#### 方法2: filter_complex（1コマンドで完結）
+
+```bash
+# 3つの本編区間を連結する例
+ffmpeg -i video.mp4 -filter_complex \
+  "[0:v]trim=start=0:end=120,setpts=PTS-STARTPTS[v0]; \
+   [0:a]atrim=start=0:end=120,asetpts=PTS-STARTPTS[a0]; \
+   [0:v]trim=start=180:end=600,setpts=PTS-STARTPTS[v1]; \
+   [0:a]atrim=start=180:end=600,asetpts=PTS-STARTPTS[a1]; \
+   [0:v]trim=start=660:end=1500,setpts=PTS-STARTPTS[v2]; \
+   [0:a]atrim=start=660:end=1500,asetpts=PTS-STARTPTS[a2]; \
+   [v0][a0][v1][a1][v2][a2]concat=n=3:v=1:a=1[outv][outa]" \
+  -map "[outv]" -map "[outa]" -c:v libx264 -c:a aac output.mp4
+```
+
+### シェルスクリプト例：自動CMカット
+
+```bash
+#!/bin/bash
+# cm-cut.sh - CM検出結果から自動的にCMカット動画を生成
+
+INPUT="$1"
+OUTPUT="${2:-output.mp4}"
+
+# CM検出
+CM_JSON=$(ffmpeg -i "$INPUT" -af "silencedetect=n=-40dB:d=0.3" -f null - 2>&1 | cm-detector)
+
+# 動画の長さを取得（ミリ秒）
+DURATION_MS=$(ffprobe -v error -show_entries format=duration -of csv=p=0 "$INPUT" | awk '{printf "%.0f", $1 * 1000}')
+
+# 本編区間を計算してfilter_complexを構築
+FILTER=""
+CONCAT_INPUTS=""
+IDX=0
+PREV_END=0
+
+# CMブロックの開始・終了時刻を処理
+while IFS= read -r line; do
+  START_MS=$(echo "$line" | jq -r '.start_ms')
+  END_MS=$(echo "$line" | jq -r '.end_ms')
+
+  if [ "$PREV_END" -lt "$START_MS" ]; then
+    START_SEC=$(echo "scale=3; $PREV_END / 1000" | bc)
+    END_SEC=$(echo "scale=3; $START_MS / 1000" | bc)
+    FILTER+="[0:v]trim=start=${START_SEC}:end=${END_SEC},setpts=PTS-STARTPTS[v${IDX}];"
+    FILTER+="[0:a]atrim=start=${START_SEC}:end=${END_SEC},asetpts=PTS-STARTPTS[a${IDX}];"
+    CONCAT_INPUTS+="[v${IDX}][a${IDX}]"
+    ((IDX++))
+  fi
+  PREV_END=$END_MS
+done < <(echo "$CM_JSON" | jq -c '.cm_blocks[]')
+
+# 最後のCM以降の本編
+if [ "$PREV_END" -lt "$DURATION_MS" ]; then
+  START_SEC=$(echo "scale=3; $PREV_END / 1000" | bc)
+  END_SEC=$(echo "scale=3; $DURATION_MS / 1000" | bc)
+  FILTER+="[0:v]trim=start=${START_SEC}:end=${END_SEC},setpts=PTS-STARTPTS[v${IDX}];"
+  FILTER+="[0:a]atrim=start=${START_SEC}:end=${END_SEC},asetpts=PTS-STARTPTS[a${IDX}];"
+  CONCAT_INPUTS+="[v${IDX}][a${IDX}]"
+  ((IDX++))
+fi
+
+FILTER+="${CONCAT_INPUTS}concat=n=${IDX}:v=1:a=1[outv][outa]"
+
+ffmpeg -i "$INPUT" -filter_complex "$FILTER" \
+  -map "[outv]" -map "[outa]" -c:v libx264 -c:a aac "$OUTPUT"
+```
+
+使用方法：
+```bash
+chmod +x cm-cut.sh
+./cm-cut.sh input.mp4 output_no_cm.mp4
+```
+
+## 検出アルゴリズム
+
+1. ffmpegのsilencedetect出力から無音区間を抽出
+2. 無音区間の中心点をCM境界候補として特定
+3. 境界間の間隔が15秒単位（15/30/45/60/75/90秒）または短時間単位（5/10秒）かを判定
+4. 連続するCM候補をチェインとしてグループ化
+5. 以下の条件を満たすチェインをCMブロックとして出力：
+   - 合計60秒以上
+   - 標準単位（15秒倍数）が2個以上
+   - 合計360秒以下
+
+## ライセンス
+
+MIT

@@ -1,0 +1,18 @@
+# Rust
+/target/
+/vendor/
+
+# Development scripts
+build.sh
+run.sh
+
+# Internal documents (sensitive/development notes)
+CONTEXT.md
+IMPROVEMENT_PLAN.md
+
+# Test data
+/testdata/
+
+# GitHub Actions workflows (added separately due to scope requirements)
+.github/workflows/*
+!.github/workflows/release.yml
