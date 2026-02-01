@@ -58,6 +58,8 @@ ffmpeg -i video.mp4 -af "silencedetect=n=-40dB:d=0.3" -f null - 2>&1 | \
 }
 ```
 
+JSON 出力には `start_offset_ms` も含まれます。これは録画の先頭から本編開始までのオフセットで、一般に2〜8秒程度になり、最初に検出された無音区間の中心点を返します。
+
 ## Kubernetes init container での使用例
 
 cm-detectorをinit containerとして使用し、バイナリを共有ボリュームにコピーする例：
@@ -170,6 +172,8 @@ ffmpeg -i video.mp4 -filter_complex \
 
 ### シェルスクリプト例：自動CMカット
 
+JSON出力の `start_offset_ms` は本編開始位置の推定値であり、トリミングの基準点として使用します。この値から処理を開始することで、録画先頭の不要部分を除去できます。
+
 ```bash
 #!/bin/bash
 # cm-cut.sh - CM検出結果から自動的にCMカット動画を生成
@@ -183,11 +187,16 @@ CM_JSON=$(ffmpeg -i "$INPUT" -af "silencedetect=n=-40dB:d=0.3" -f null - 2>&1 | 
 # 動画の長さを取得（ミリ秒）
 DURATION_MS=$(ffprobe -v error -show_entries format=duration -of csv=p=0 "$INPUT" | awk '{printf "%.0f", $1 * 1000}')
 
+# start_offset_msを取得し、非負整数にクランプ
+START_OFFSET=$(echo "$CM_JSON" | jq -r '.start_offset_ms // 0')
+START_OFFSET=${START_OFFSET%.*}  # 小数点以下を削除
+START_OFFSET=$((START_OFFSET < 0 ? 0 : START_OFFSET))
+
 # 本編区間を計算してfilter_complexを構築
 FILTER=""
 CONCAT_INPUTS=""
 IDX=0
-PREV_END=0
+PREV_END=$START_OFFSET
 
 # CMブロックの開始・終了時刻を処理
 while IFS= read -r line; do

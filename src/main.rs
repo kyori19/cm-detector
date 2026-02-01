@@ -3,6 +3,8 @@ use std::io::{self, Read};
 
 // 定数
 const TOLERANCE_MS: i64 = 500;
+const START_OFFSET_MIN_MS: i64 = 2000;
+const START_OFFSET_MAX_MS: i64 = 8000;
 const MIN_BLOCK_DURATION_SEC: f64 = 60.0;
 const MAX_BLOCK_DURATION_SEC: f64 = 360.0; // 6分を超えるブロックは異常とみなす
 const MIN_STANDARD_UNITS: usize = 2; // ブロックに必要な標準単位の最小数
@@ -44,6 +46,7 @@ struct CmBlock {
 #[derive(Debug, Serialize)]
 struct OutputJson {
     input_file: String,
+    start_offset_ms: Option<i64>,
     cm_blocks: Vec<CmBlock>,
     silence_segments: Vec<SilenceSegmentOutput>,
 }
@@ -64,6 +67,7 @@ fn main() {
         .expect("Failed to read from stdin");
     let stdin_data = String::from_utf8_lossy(&raw_input);
     let silence_segments = parse_silence_output(&stdin_data);
+    let start_offset_ms = detect_start_offset_ms(&silence_segments);
 
     eprintln!("Found {} silence segments", silence_segments.len());
 
@@ -78,6 +82,7 @@ fn main() {
     // JSON出力
     let output = OutputJson {
         input_file: "stdin".to_string(),
+        start_offset_ms,
         cm_blocks: blocks,
         silence_segments: silence_segments
             .iter()
@@ -156,6 +161,17 @@ fn extract_boundaries(silence_segments: &[SilenceSegment]) -> Vec<CmBoundary> {
 }
 
 // 15秒単位（15/30/45/60/75/90秒）かを判定
+
+fn detect_start_offset_ms(silence_segments: &[SilenceSegment]) -> Option<i64> {
+    for seg in silence_segments {
+        let center_ms = (seg.start_ms + seg.end_ms) / 2;
+        if center_ms >= START_OFFSET_MIN_MS && center_ms <= START_OFFSET_MAX_MS {
+            return Some(center_ms);
+        }
+    }
+    None
+}
+
 fn is_standard_unit(duration_sec: f64) -> bool {
     let tolerance_sec = TOLERANCE_MS as f64 / 1000.0;
 
@@ -270,5 +286,20 @@ fn try_make_block(chain: &[CmCandidate], standard_count: usize) -> Option<CmBloc
         })
     } else {
         None
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_detect_start_offset_ms() {
+        let segments = vec![
+            SilenceSegment { start_ms: 0, end_ms: 400, duration_ms: 400 },
+            SilenceSegment { start_ms: 1900, end_ms: 2100, duration_ms: 200 },
+            SilenceSegment { start_ms: 9000, end_ms: 9050, duration_ms: 50 },
+        ];
+        assert_eq!(detect_start_offset_ms(&segments), Some(2000));
     }
 }
