@@ -58,10 +58,11 @@ struct SilenceSegmentOutput {
 fn main() {
     // 無音区間を検出（標準入力からffmpeg silencedetectの出力を読み取る）
     eprintln!("Reading silence detection data from stdin...");
-    let mut stdin_data = String::new();
+    let mut raw_input = Vec::new();
     io::stdin()
-        .read_to_string(&mut stdin_data)
+        .read_to_end(&mut raw_input)
         .expect("Failed to read from stdin");
+    let stdin_data = String::from_utf8_lossy(&raw_input);
     let silence_segments = parse_silence_output(&stdin_data);
 
     eprintln!("Found {} silence segments", silence_segments.len());
@@ -92,12 +93,24 @@ fn main() {
     println!("{}", json);
 }
 
+/// Check if a string contains only ASCII characters
+fn is_ascii_line(line: &str) -> bool {
+    line.bytes().all(|b| b.is_ascii())
+}
+
 // FFmpeg silencedetect出力から無音区間をパース
 fn parse_silence_output(output: &str) -> Vec<SilenceSegment> {
     let mut segments = Vec::new();
     let mut current_start: Option<f64> = None;
+    let mut skipped_lines = 0;
 
     for line in output.lines() {
+        // Skip lines containing non-ASCII characters to avoid parsing issues
+        if !is_ascii_line(line) {
+            skipped_lines += 1;
+            continue;
+        }
+
         if line.contains("silence_start:") {
             if let Some(start) = extract_timestamp(line, "silence_start:") {
                 current_start = Some(start);
@@ -112,6 +125,10 @@ fn parse_silence_output(output: &str) -> Vec<SilenceSegment> {
                 current_start = None;
             }
         }
+    }
+
+    if skipped_lines > 0 {
+        eprintln!("Skipped {} lines containing non-ASCII characters", skipped_lines);
     }
 
     segments
