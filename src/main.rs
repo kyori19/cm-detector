@@ -175,7 +175,7 @@ fn detect_start_offset_ms(silence_segments: &[SilenceSegment]) -> Option<i64> {
 fn is_standard_unit(duration_sec: f64) -> bool {
     let tolerance_sec = TOLERANCE_MS as f64 / 1000.0;
 
-    for unit in [15.0, 30.0, 45.0, 60.0, 75.0, 90.0] {
+    for unit in [15.0, 30.0, 45.0, 60.0, 75.0] {
         if (duration_sec - unit).abs() <= tolerance_sec {
             return true;
         }
